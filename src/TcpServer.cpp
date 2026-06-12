@@ -6,6 +6,10 @@
 #include <atomic>
 #include <sstream>
 
+#include <miniupnpc.h>
+#include <upnpcommands.h>
+#include <upnperrors.h>
+
 #ifdef _WIN32
     #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
@@ -14,6 +18,7 @@
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #pragma comment(lib, "ws2_32.lib")
+    #pragma comment(lib, "iphlpapi.lib")
     using SocketType = SOCKET;
     #define CLOSE_SOCKET(s) closesocket(s)
     #define INVALID_SOCKET_VAL INVALID_SOCKET
@@ -50,6 +55,10 @@ public:
     TcpServer::MessageCallback on_message;
     TcpServer::DisconnectCallback on_disconnect;
 
+    int upnp_mapped_port_ = -1;
+    std::string upnp_control_url_ = "";
+    std::string upnp_service_type_ = "";
+
     TcpServerImpl()
     {
 #ifdef _WIN32
@@ -65,6 +74,89 @@ public:
 #endif
     }
 
+    void TryMapPortUPnP(int port)
+    {
+        int error = 0;
+
+        struct UPNPDev* devlist = upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, &error);
+        if (!devlist)
+        {
+            std::cerr << "[UPnP] Error: " << error << std::endl;
+            return;
+        }
+
+        struct UPNPUrls urls;
+        struct IGDdatas data;
+        char lanaddr[64] = {0};
+        char wanaddr[64] = {0};
+
+        int status = UPNP_GetValidIGD(devlist, &urls, &data, lanaddr, sizeof(lanaddr), wanaddr, sizeof(wanaddr));
+        freeUPNPDevlist(devlist);
+
+        if (status != 1 && status != 2)
+        {
+            std::cerr << "[UPnP] No valid router (IGD) found. Status: " << status << std::endl;
+            if (status > 0)
+            {
+                FreeUPNPUrls(&urls);
+                return;
+            }
+        }
+
+        std::string port_str = std::to_string(port);
+
+        int r = UPNP_AddPortMapping(urls.controlURL,
+                                    data.first.servicetype,
+                                    port_str.c_str(),
+                                    port_str.c_str(),
+                                    lanaddr,
+                                    "Fibbage",
+                                    "TCP",
+                                    nullptr,
+                                    "0");
+
+        if (r != UPNPCOMMAND_SUCCESS)
+        {
+            std::cerr << "[UPNP] Failed to forward port " << port << ". Error: " << r << std::endl;
+            FreeUPNPUrls(&urls);
+            return;
+        }
+
+        std::cout << "[UPNP] Port " << port << " successfully opened! External IP for connection: " << wanaddr << std::endl;
+
+        upnp_mapped_port_ = port;
+        upnp_control_url_ = urls.controlURL;
+        upnp_service_type_ = data.first.servicetype;
+        
+        FreeUPNPUrls(&urls);
+    }
+
+    void UnmapPortUPnP()
+    {
+        if (upnp_mapped_port_ == -1)
+        {
+            return;
+        }
+
+        std::string port_str = std::to_string(upnp_mapped_port_);
+        int r = UPNP_DeletePortMapping(upnp_control_url_.c_str(), 
+                                       upnp_service_type_.c_str(), 
+                                       port_str.c_str(), "TCP", nullptr);
+
+        if (r == UPNPCOMMAND_SUCCESS)
+        {
+            std::cout << "[UPnP] Правило для порта " << upnp_mapped_port_ << " успешно удалено из роутера.\n";
+        }
+        else
+        {
+            std::cerr << "[UPnP] Failed to close the port on the router. Error code: " << r << std::endl;
+        }
+
+        upnp_mapped_port_ = -1;
+        upnp_control_url_.clear();
+        upnp_service_type_.clear();
+    }
+
     void Stop()
     {
         if (!is_running_)
@@ -72,6 +164,9 @@ public:
             return;
         }
         is_running_ = false;
+
+        UnmapPortUPnP();
+
         on_message = nullptr;
         on_disconnect = nullptr;
 
@@ -250,7 +345,7 @@ void AcceptPlayer(TcpServerImpl* impl)
         std::lock_guard<std::mutex> lock(impl->clients_mutex);
         int temp_id = impl->next_client_id++;
 
-        std::cout << "[TcpServer::AcceptPlayer] New player connect with id: " << temp_id << ".\n";
+        std::cout << "[TcpServer::AcceptPlayer] New player connect with id: " << temp_id << std::endl;
 
         impl->clients[temp_id].sock = client_sock;
         impl->clients[temp_id].th = std::thread(ClientThread, impl, temp_id, client_sock);
@@ -264,9 +359,9 @@ bool TcpServer::Start(int port)
     if (impl_->listen_sock_ == INVALID_SOCKET_VAL) 
     {
 #ifdef _WIN32
-        std::cerr << "[TcpServer::Start] Error code: " << WSAGetLastError() << "\n";
+        std::cerr << "[TcpServer::Start] Error code: " << WSAGetLastError() << std::endl;
 #else   
-        std::clog << "[TcpServer::Start] errno: " << errno << "\n";
+        std::clog << "[TcpServer::Start] errno: " << errno << std::endl;
 #endif
         return false;
     }
@@ -279,9 +374,9 @@ bool TcpServer::Start(int port)
     if(bind(impl_->listen_sock_, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0)
     {
 #ifdef _WIN32
-        std::cerr << "[TcpServer::Start] Error code: " << WSAGetLastError() << "\n";
+        std::cerr << "[TcpServer::Start] Error code: " << WSAGetLastError() << std::endl;
 #else   
-        std::clog << "[TcpServer::Start] errno: " << errno << "\n";
+        std::clog << "[TcpServer::Start] errno: " << errno << std::endl;
 #endif
         CLOSE_SOCKET(impl_->listen_sock_);
         return false;
@@ -294,6 +389,9 @@ bool TcpServer::Start(int port)
 
     impl_->is_running_ = true;
     impl_->accept_thread = std::thread(AcceptPlayer, impl_.get());
+
+    impl_->TryMapPortUPnP(port);
+
     return true;
 }
 

@@ -19,6 +19,8 @@ enum class PacketType
     SendVoteOptions, 
     RoundResults,
     GameOver,
+    RestartGame,
+    CloseGame,
 
     GetHelper,
     Wrong,
