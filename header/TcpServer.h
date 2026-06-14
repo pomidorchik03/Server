@@ -29,5 +29,8 @@ public:
     void SetMessageCallback(MessageCallback cb);
     void SetDisconnectCallback(DisconnectCallback cb);
 
+    std::string GetWANIP();
+    std::string GetLANIP();
+
     std::string GetTokenPlayer(int client_id);
 };

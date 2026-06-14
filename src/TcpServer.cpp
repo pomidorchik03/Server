@@ -59,6 +59,9 @@ public:
     std::string upnp_control_url_ = "";
     std::string upnp_service_type_ = "";
 
+    std::string wan = "";
+    std::string lan = "";
+
     TcpServerImpl()
     {
 #ifdef _WIN32
@@ -99,8 +102,8 @@ public:
             if (status > 0)
             {
                 FreeUPNPUrls(&urls);
-                return;
             }
+            return; 
         }
 
         std::string port_str = std::to_string(port);
@@ -123,6 +126,8 @@ public:
         }
 
         std::cout << "[UPNP] Port " << port << " successfully opened! External IP for connection: " << wanaddr << std::endl;
+        wan = wanaddr;
+        lan = lanaddr;
 
         upnp_mapped_port_ = port;
         upnp_control_url_ = urls.controlURL;
@@ -454,6 +459,16 @@ void TcpServer::BroadcastData(const std::vector<uint8_t>& data)
 void TcpServer::Stop()
 {
     impl_->Stop();
+}
+
+std::string TcpServer::GetWANIP()
+{
+    return impl_->wan;
+}
+
+std::string TcpServer::GetLANIP()
+{
+    return impl_->lan;
 }
 
 std::string TcpServer::GetTokenPlayer(int client_id)
